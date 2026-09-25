@@ -27,6 +27,15 @@
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
     </form>
 
+    <form v-if="editing" class="filter-bar" @submit.prevent="submitForm">
+      <label v-for="field in editableFields" :key="field" class="filter-item">
+        <span>{{ field }}</span>
+        <input v-model="editing.values[field]" :placeholder="`请输入${field}`" />
+      </label>
+      <button class="btn primary" type="submit">{{ editing.id ? '保存修改' : '确认登记' }}</button>
+      <button class="btn ghost" type="button" @click="editing = null">取消</button>
+    </form>
+
     <table class="data-table">
       <thead>
         <tr>
@@ -38,6 +47,7 @@
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
+            <button class="link" type="button" @click="openEdit(row)">编辑</button>
             <button
               v-for="action in actions"
               :key="action"
@@ -68,18 +78,21 @@ import { onMounted, ref } from 'vue'
 import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type StatItem = { label: string; value: number }
 
 const ENDPOINT = '/api/container'
 const columns = ["箱号", "箱型", "箱况等级", "所属船公司", "尺寸规格", "自重", "检验到期日", "箱体状态"]
+const editableFields = columns
 const actions = ["登记检验", "标记可周转", "报废箱体"]
 const statuses = ["待检", "可周转", "待修", "已报废"]
-const stats = [{"label": "在册箱量", "value": 0}, {"label": "待修箱量", "value": 0}, {"label": "检验到期箱量", "value": 0}]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const stats = ref<StatItem[]>([])
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+const editing = ref<{ id: number | null; values: Record<string, string> } | null>(null)
 
 function resetFilters() {
   filters.value = {}
@@ -91,7 +104,37 @@ function exportRows() {
 }
 
 function openCreate() {
-  errorMessage.value = '集装箱登记入口尚未接入审批流'
+  editing.value = { id: null, values: {} }
+}
+
+function openEdit(row: Row) {
+  const values: Record<string, string> = {}
+  for (const field of editableFields) {
+    values[field] = String(row[field] ?? '')
+  }
+  editing.value = { id: Number(row.id), values }
+}
+
+async function submitForm() {
+  if (!editing.value) {
+    return
+  }
+  errorMessage.value = ''
+  const { id, values } = editing.value
+  try {
+    const response = await request(id ? `${ENDPOINT}/${id}` : ENDPOINT, {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify({ values }),
+    })
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || '集装箱档案保存未生效，请稍后重试')
+    }
+    editing.value = null
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '集装箱档案保存失败'
+  }
 }
 
 async function runAction(action: string, row: Row) {
@@ -99,10 +142,11 @@ async function runAction(action: string, row: Row) {
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('集装箱档案动作未生效，请稍后重试')
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || '集装箱档案动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
@@ -112,9 +156,13 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const params = new URLSearchParams()
+  const keyword = filters.value[filterFields[0]]
+  if (keyword) {
+    params.set('keyword', keyword)
+  }
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${params.toString()}`)
     if (!response.ok) {
       throw new Error('集装箱列表读取失败')
     }
@@ -123,6 +171,14 @@ async function reload() {
     total.value = payload.total ?? rows.value.length
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '集装箱档案列表读取失败'
+  }
+  try {
+    const response = await request(`${ENDPOINT}/stats`)
+    if (response.ok) {
+      stats.value = await response.json()
+    }
+  } catch {
+    // 统计卡片读取失败不阻塞列表展示
   }
 }
 
