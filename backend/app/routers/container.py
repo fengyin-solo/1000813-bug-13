@@ -20,14 +20,36 @@ STATUSES = ["待检", "可周转", "待修", "已报废"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按箱号检索"),
     status: str | None = Query(default=None, description="待检、可周转、待修、已报废"),
+    box_type: str | None = Query(default=None, alias="箱型", description="按箱型精确筛选"),
+    grade: str | None = Query(default=None, alias="箱况等级", description="按箱况等级筛选"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
     """按箱号与状态过滤集装箱档案列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword,
+        status=status,
+        box_type=box_type,
+        grade=grade,
+        page=page,
+        size=size,
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/stats")
+def stats() -> dict[str, Any]:
+    """集装箱档案实时统计：在册、可周转、待修、检验到期与各箱型分布。"""
+    return service.stats()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出集装箱档案清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "container", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -44,8 +66,17 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     """登记一条集装箱，缺字段时说明原因而不是静默丢弃。"""
     entry, missing = service.create_entry(payload.values)
     if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+        return ActionResult(ok=False, message="；".join(missing))
     return ActionResult(ok=True, message="集装箱已登记", entry=entry)
+
+
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """修改档案资料（如调整箱型）；只改主数据一处，堆存、闸口下次读取即跟随。"""
+    entry, errors = service.update_entry(entry_id, payload.values)
+    if errors:
+        return ActionResult(ok=False, message="；".join(errors))
+    return ActionResult(ok=True, message="集装箱档案已更新", entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
@@ -56,10 +87,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出集装箱档案清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "container", "total": total, "items": items}

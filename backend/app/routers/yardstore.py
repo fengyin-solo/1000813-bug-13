@@ -20,14 +20,38 @@ STATUSES = ["待进场", "堆存中", "待提离", "已提离"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按堆存单号检索"),
     status: str | None = Query(default=None, description="待进场、堆存中、待提离、已提离"),
+    box_no: str | None = Query(default=None, alias="关联箱号", description="按箱号检索"),
+    yard_code: str | None = Query(default=None, alias="箱区编号", description="按箱区编号检索"),
+    include_left: bool = Query(default=False, alias="include_left", description="是否包含已提离（出闸）的记录"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按堆存单号与状态过滤堆存记录列表；没有数据时返回空页，不报错。"""
+    """堆存清单默认只列在场箱；已提离（含已出闸）的记录需显式包含或按状态查询。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword,
+        status=status,
+        box_no=box_no,
+        yard_code=yard_code,
+        include_left=include_left,
+        page=page,
+        size=size,
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/stats")
+def stats() -> dict[str, Any]:
+    """堆存实时统计：在场、堆存中、今日进场、今日提离箱量。"""
+    return service.stats()
+
+
+@router.get("/export")
+def export_entries(include_left: bool = True) -> dict[str, Any]:
+    """导出堆存记录清单：默认含已提离的完整历史，便于留档核对。"""
+    items, total = service.list_entries(page=1, size=10000, include_left=include_left)
+    return {"module": "yardstore", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -41,10 +65,10 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条堆存单，缺字段时说明原因而不是静默丢弃。"""
+    """登记一条堆存单，缺字段或引用了不存在的箱号/箱区时说明原因。"""
     entry, missing = service.create_entry(payload.values)
     if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+        return ActionResult(ok=False, message="；".join(missing))
     return ActionResult(ok=True, message="堆存单已登记", entry=entry)
 
 
@@ -56,10 +80,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出堆存记录清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "yardstore", "total": total, "items": items}
